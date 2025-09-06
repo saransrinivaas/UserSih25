@@ -45,7 +45,7 @@ class _WelcomePageState extends State<WelcomePage> {
   }
 
   void _finishOnboarding() {
-    Navigator.pushReplacementNamed(context, "/home");
+    Navigator.pushReplacementNamed(context, "/login");
   }
 
   @override

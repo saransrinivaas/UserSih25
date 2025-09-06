@@ -7,15 +7,26 @@ environment:
   sdk: ^3.9.0
 
 dependencies:
-  flutter_svg: ^2.0.9
   flutter:
     sdk: flutter
+  flutter_svg: ^2.0.10
+  image_picker: ^1.1.1
+  geolocator: ^14.0.2
+  firebase_core: ^4.1.0
+  firebase_auth: ^6.0.1
+  cloud_firestore: ^6.0.1
+  firebase_storage: ^13.0.1
+
+  rename: ^3.1.0
+  shared_preferences: ^2.2.2
+  fluttertoast: ^8.2.12
+  permission_handler: ^12.0.1
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-
 
 flutter:
   uses-material-design: true

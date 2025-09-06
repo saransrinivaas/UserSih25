@@ -1,21 +1,21 @@
 {
   "project_info": {
-    "project_number": "621817856573",
-    "project_id": "civic-connect-c48cf",
-    "storage_bucket": "civic-connect-c48cf.firebasestorage.app"
+    "project_number": "540961193745",
+    "project_id": "sihback",
+    "storage_bucket": "sihback.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:621817856573:android:7f5f37ca852663d4cbe054",
+        "mobilesdk_app_id": "1:540961193745:android:e3f1c58d9dbf50037b96b0",
         "android_client_info": {
-          "package_name": "com.example.flutter_application_1"
+          "package_name": "com.civicConnect.app"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDknvi7xYdXRAt0u2NRiFO6Cduo4F_O6uU"
+          "current_key": "AIzaSyCV7SR_ib9eDNkxf5mX872lP9xgDjO8RdM"
         }
       ],
       "services": {
