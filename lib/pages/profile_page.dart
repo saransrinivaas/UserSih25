@@ -35,6 +35,8 @@ class _ProfilePageState extends State<ProfilePage> {
     AppLang.en: {
       'profile': {
         'title': 'Profile',
+        'name': 'Name',
+        'email': 'Email',
         'contact': 'Contact',
         'address': 'Address',
         'update': 'Update Profile',
@@ -52,6 +54,8 @@ class _ProfilePageState extends State<ProfilePage> {
     AppLang.hi: {
       'profile': {
         'title': 'प्रोफ़ाइल',
+        'name': 'नाम',
+        'email': 'ईमेल',
         'contact': 'संपर्क',
         'address': 'पता',
         'update': 'प्रोफ़ाइल अपडेट करें',
@@ -233,9 +237,9 @@ class _ProfilePageState extends State<ProfilePage> {
             children: [
               CircleAvatar(radius: 50, backgroundColor: themeGreen, child: const Icon(Icons.person, size: 50, color: Colors.white)),
               const SizedBox(height: 20),
-              _buildTextField(controller: _nameController, label: 'Name', icon: Icons.person),
+              _buildTextField(controller: _nameController, label: tProfile['name']!, icon: Icons.person),
               const SizedBox(height: 12),
-              _buildTextField(controller: _emailController, label: 'Email', icon: Icons.email, readOnly: true),
+              _buildTextField(controller: _emailController, label: tProfile['email']!, icon: Icons.email, readOnly: true),
               const SizedBox(height: 12),
               _buildTextField(controller: _contactController, label: tProfile['contact']!, icon: Icons.phone),
               const SizedBox(height: 12),
