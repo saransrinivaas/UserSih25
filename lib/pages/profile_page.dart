@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'widgets/app_botton_nav.dart'; // make sure the path is correct
+
 
 enum AppLang { en, hi }
 
@@ -255,21 +257,7 @@ class _ProfilePageState extends State<ProfilePage> {
           ),
         ),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _bottomIndex,
-        onDestinationSelected: (i) {
-          setState(() => _bottomIndex = i);
-          if (i == 0) return; // already profile
-          if (i == 1) Navigator.pushReplacementNamed(context, '/home');
-          if (i == 2) Navigator.pushReplacementNamed(context, '/report');
-        },
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: ''),
-          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: ''),
-          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long), label: ''),
-        ],
-        backgroundColor: Colors.white,
-      ),
+      bottomNavigationBar: const AppBottomNav(currentIndex: 0),
     );
   }
 

@@ -6,6 +6,22 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'dart:math';
+import 'widgets/app_botton_nav.dart'; // make sure the path is correct
+
+
+double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+  const earthRadius = 6371000; // meters
+  final dLat = (lat2 - lat1) * (pi / 180);
+  final dLon = (lon2 - lon1) * (pi / 180);
+
+  final a = sin(dLat / 2) * sin(dLat / 2) +
+      cos(lat1 * (pi / 180)) * cos(lat2 * (pi / 180)) *
+          sin(dLon / 2) * sin(dLon / 2);
+
+  final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return earthRadius * c;
+}
 
 enum AppLang { en, hi }
 
@@ -95,6 +111,59 @@ class _HomePageState extends State<HomePage> {
     setState(() => _selectedCategory = cat);
     _scrollToDetails();
   }
+
+Future<String?> _askForUpvoteDescription() async {
+  final controller = TextEditingController();
+
+  return showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text("Add Description"),
+      content: TextField(
+        controller: controller,
+        maxLines: 3,
+        decoration: const InputDecoration(
+          hintText: "Describe the issue on your own words? (optional)",
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        TextButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text("Submit")),
+      ],
+    ),
+  );
+}
+
+Future<void> _saveUpvote(String issueId, String description) async {
+  final user = _auth.currentUser;
+  if (user == null) {
+    showSafeToast("You must be logged in to upvote");
+    return;
+  }
+
+  try {
+    final upvoteData = {
+      "issueId": issueId,
+      "userId": user.uid,
+      "description": description,
+      "createdAt": FieldValue.serverTimestamp(),
+    };
+
+    await FirebaseFirestore.instance.collection('upvotes').add(upvoteData);
+
+    // Increment upvote counter in the issue document
+    await FirebaseFirestore.instance
+        .collection('issues')
+        .doc(issueId)
+        .update({"upvotes": FieldValue.increment(1)});
+
+    showSafeToast("Upvote recorded!");
+  } catch (e) {
+    showSafeToast("Failed to record upvote: $e");
+  }
+}
 
   Future<void> _scrollToDetails() async {
     final ctx = _detailsKey.currentContext;
@@ -187,6 +256,48 @@ Future<String?> _uploadImage(File file) async {
     return null;
   }
 }
+Future<bool> _showExistingIssueDialog(Map<String, dynamic> issueData) async {
+  return await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text("Issue Already Reported"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Category: ${issueData['category']}"),
+            const SizedBox(height: 6),
+            if (issueData['description'] != null && issueData['description'].toString().isNotEmpty)
+              Text("Description: ${issueData['description']}"),
+            const SizedBox(height: 6),
+            if (issueData['imageUrl'] != null)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(issueData['imageUrl'], height: 120, fit: BoxFit.cover),
+              ),
+            const SizedBox(height: 6),
+            Text("Upvotes: ${issueData['upvotes'] ?? 0}"),
+            const SizedBox(height: 12),
+            const Text("Do you want to upvote this issue?", style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("No"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2E582D)),
+            child: const Text("Yes, Upvote"),
+          ),
+        ],
+      );
+    },
+  ) ?? false;
+}
 
 // Safe toast wrapper
 void showSafeToast(String? msg) {
@@ -214,43 +325,87 @@ Future<void> _submitIssue() async {
   final imageUrl = await _uploadImage(_imageFile!);
   if (imageUrl == null) {
     setState(() => _isLoading = false);
-    return; // stop if upload failed
+    return;
   }
 
   final user = _auth.currentUser;
   final latLng = _locationText!.split(',');
-
-  final issueData = {
-    "category": _selectedCategory?['label']['en'] ?? 'Other',
-    "description": _description,
-    "priority": "Medium", // keep default, no dropdown for user
-    "status": "Pending",
-    "createdAt": FieldValue.serverTimestamp(),
-    "createdBy": user?.uid ?? 'anonymous',
-    "location": {
-      "lat": double.tryParse(latLng[0]) ?? 0,
-      "lng": double.tryParse(latLng[1]) ?? 0,
-    },
-    "upvotes": 0,
-    "imageUrl": imageUrl,
-    "departmentId": "dept_1757055931512",
-  };
+  final double currentLat = double.tryParse(latLng[0]) ?? 0;
+  final double currentLng = double.tryParse(latLng[1]) ?? 0;
+  final String currentCategory = _selectedCategory?['label']['en'] ?? 'Other';
 
   try {
-    await FirebaseFirestore.instance.collection('issues').add(issueData);
-    Fluttertoast.showToast(msg: "Issue submitted successfully!");
+    // 1️⃣ Check if similar issue already exists
+    final snapshot = await FirebaseFirestore.instance
+        .collection('issues')
+        .where('category', isEqualTo: currentCategory)
+        .where('status', isEqualTo: "Pending")
+        .get();
+
+    bool matchedExisting = false;
+
+    for (var doc in snapshot.docs) {
+  final data = doc.data();
+  final loc = data['location'] as Map<String, dynamic>?;
+
+  if (loc != null) {
+    final existingLat = (loc['lat'] as num).toDouble();
+    final existingLng = (loc['lng'] as num).toDouble();
+
+    final distance = _calculateDistance(currentLat, currentLng, existingLat, existingLng);
+    if (distance <= 100) {
+      matchedExisting = true;
+
+      // 🔥 Show existing issue details first
+      final shouldUpvote = await _showExistingIssueDialog(data);
+
+      if (shouldUpvote) {
+        final desc = await _askForUpvoteDescription();
+        if (desc != null) {
+          await _saveUpvote(doc.id, desc);
+        }
+      }
+
+      break;
+    }
+  }
+}
+
+
+    // 2️⃣ If no match, create a brand new issue
+    if (!matchedExisting) {
+      final issueData = {
+        "category": currentCategory,
+        "description": _description,
+        "priority": "Medium",
+        "status": "Pending",
+        "createdAt": FieldValue.serverTimestamp(),
+        "createdBy": user?.uid ?? 'anonymous',
+        "location": {"lat": currentLat, "lng": currentLng},
+        "upvotes": 0,
+        "imageUrl": imageUrl,
+        "departmentId": "dept_1757055931512",
+      };
+
+      await FirebaseFirestore.instance.collection('issues').add(issueData);
+      Fluttertoast.showToast(msg: "Issue submitted successfully!");
+    }
+
+    // Reset fields
     setState(() {
       _selectedCategory = null;
       _imageFile = null;
       _description = '';
       _locationText = null;
     });
+
   } catch (e) {
     Fluttertoast.showToast(msg: "Failed to submit issue: $e");
   } finally {
     setState(() => _isLoading = false);
   }
 }
+
 
 
   @override
@@ -386,6 +541,7 @@ Future<void> _submitIssue() async {
             )
         ],
       ),
+      bottomNavigationBar: AppBottomNav(currentIndex: 0), // Assuming Home is at index 0
     );
   }
 }
