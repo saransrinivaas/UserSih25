@@ -1,18 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'auth_wrapper.dart';
 import 'pages/home_page.dart';
 import 'pages/login_page.dart';
 import 'pages/profile_page.dart';
 import 'pages/report_page.dart';
+import 'pages/notifications_page.dart';
+import 'pages/your_local_team_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  await dotenv.load(fileName: ".env");
+
   try {
     await Firebase.initializeApp();
+    // Enable offline persistence for Firestore (cache for offline reads/writes)
+    FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: true);
 
     // ✅ Request location permission on startup
     await _requestLocationPermission();
@@ -61,6 +69,8 @@ class MyApp extends StatelessWidget {
         '/login': (context) => const AuthPage(),
         '/profile': (context) => const ProfilePage(),
         '/report': (context) => const ReportsPage(),
+        '/notifications': (context) => const NotificationsPage(),
+        '/local_team': (context) => const YourLocalTeamPage(),
       },
     );
   }

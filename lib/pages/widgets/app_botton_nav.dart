@@ -10,8 +10,6 @@ class AppBottomNav extends StatelessWidget {
     return NavigationBar(
       selectedIndex: currentIndex,
       onDestinationSelected: (i) {
-        if (i == currentIndex) return; // Do nothing if already selected
-
         if (i == 0) {
           Navigator.pushReplacementNamed(context, '/profile');
         } else if (i == 1) {

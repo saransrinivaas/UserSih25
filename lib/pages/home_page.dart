@@ -12,8 +12,14 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 import 'widgets/app_botton_nav.dart'; // keep path correct
+import 'widgets/app_drawer.dart';
+import '../utils/auto_description.dart';
 
 double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
   const earthRadius = 6371000; // meters
@@ -29,6 +35,7 @@ double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
 }
 
 enum AppLang { en, hi }
+enum VoiceStep { category, confirmCategory, photo, submit, done }
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -51,6 +58,19 @@ class _HomePageState extends State<HomePage> {
   String _description = '';
   String? _locationText; // stored as "lat,lng"
   bool _isLoading = false;
+
+  // Voice control
+  late final stt.SpeechToText _speech;
+  late final FlutterTts _tts;
+  bool _isListening = false;
+  VoiceStep _voiceStep = VoiceStep.category;
+  String _lastHeard = '';
+  bool _autoVoiceHandled = false;
+  Timer? _voiceTimer;
+  bool _isSpeaking = false;
+  int _stepAttempts = 0;
+  String _voiceUIHint = '';
+  bool _voiceActive = false;
 
   // categories (same as yours)
   final List<Map<String, dynamic>> _categories = [
@@ -86,6 +106,7 @@ class _HomePageState extends State<HomePage> {
         'delete': 'Delete Account',
         'profile': 'Profile',
         'report': 'Reports',
+        'autoDesc': 'Auto Description',
       }
     },
     AppLang.hi: {
@@ -105,6 +126,7 @@ class _HomePageState extends State<HomePage> {
         'delete': 'खाता हटाएं',
         'profile': 'प्रोफ़ाइल',
         'report': 'रिपोर्ट',
+        'autoDesc': 'स्वतः विवरण',
       }
     },
   };
@@ -120,6 +142,335 @@ class _HomePageState extends State<HomePage> {
   void _selectCategory(Map<String, dynamic> cat) {
     setState(() => _selectedCategory = cat);
     _scrollToDetails();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _speech = stt.SpeechToText();
+    _tts = FlutterTts();
+    _tts.awaitSpeakCompletion(true);
+    // Optional: warn when offline before voice
+    Connectivity().onConnectivityChanged.listen((event) async {
+      if (event != ConnectivityResult.none) {
+        await _syncPendingImages();
+      }
+    });
+    // Also attempt a sync on start
+    Future.microtask(() async => await _syncPendingImages());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (!_autoVoiceHandled && args is Map && args['voiceStart'] == true) {
+      _autoVoiceHandled = true;
+      _startVoiceFlow();
+    }
+  }
+
+  @override
+  void dispose() {
+    try { _speech.stop(); } catch (_) {}
+    try { _tts.stop(); } catch (_) {}
+    _voiceTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _speak(String text) async {
+    try {
+      _isSpeaking = true;
+      await _tts.stop();
+      await _tts.speak(text);
+    } catch (_) {}
+    _isSpeaking = false;
+  }
+
+  Future<void> _startVoiceFlow() async {
+    if (_voiceActive) return; // already active
+    _voiceStep = VoiceStep.category;
+    // Request mic permission proactively
+    try {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        showSafeToast("Microphone permission required for voice mode");
+        return;
+      }
+    } catch (_) {}
+    _stepAttempts = 0;
+    _voiceActive = true;
+    if (mounted) setState(() {});
+    await _promptStep(explain: true);
+  }
+
+  Future<void> _stopVoiceFlow() async {
+    _voiceActive = false;
+    _voiceTimer?.cancel();
+    try { await _speech.stop(); } catch (_) {}
+    try { await _tts.stop(); } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _isListening = false;
+        _voiceUIHint = '';
+        _lastHeard = '';
+      });
+    }
+  }
+
+  Future<void> _startListening() async {
+    final available = await _speech.initialize(onStatus: (s) {}, onError: (e) {});
+    if (!available) {
+      showSafeToast("Speech not available");
+      return;
+    }
+    setState(() => _isListening = true);
+    await _speech.listen(onResult: (result) {
+      final cmd = result.recognizedWords.toLowerCase();
+      if (cmd.isEmpty) return;
+      setState(() => _lastHeard = cmd);
+      _handleVoiceCommand(cmd);
+    });
+  }
+
+  // Single-utterance listening: start, wait for a final result (or timeout), then stop and process once.
+  Future<void> _startListeningSingleUtterance() async {
+    if (!_voiceActive) return;
+    // Cancel any existing timeout
+    _voiceTimer?.cancel();
+
+    final available = await _speech.initialize(onError: (e) async {
+      if (!_voiceActive) return;
+      if (mounted) setState(() => _isListening = false);
+      await _repeatPromptForStep();
+    }, onStatus: (status) async {
+      // If engine reports stopped and we have no final result, retry prompt
+      if (!_voiceActive) return;
+      if (status == 'notListening') {
+        if (mounted) setState(() => _isListening = false);
+        if (_lastHeard.isEmpty) {
+          await _sayNotHeardAndRepeat();
+        }
+      }
+    });
+    if (!available) {
+      showSafeToast("Speech not available");
+      return;
+    }
+
+    setState(() {
+      _isListening = true;
+      _lastHeard = '';
+    });
+
+    // If no final result in time, re-prompt
+    _voiceTimer = Timer(const Duration(seconds: 10), () async {
+      if (!_voiceActive) return;
+      if (!mounted) return;
+      try { await _speech.stop(); } catch (_) {}
+      if (mounted) setState(() => _isListening = false);
+      await _sayNotHeardAndRepeat();
+    });
+
+    await _speech.listen(
+      partialResults: true,
+      listenFor: const Duration(seconds: 9),
+      pauseFor: const Duration(seconds: 3),
+      onResult: (result) async {
+        // We only handle when a final result arrives
+        if (!_voiceActive) return;
+        if (!result.finalResult) {
+          final partial = result.recognizedWords.toLowerCase();
+          if (partial.isNotEmpty && mounted) {
+            setState(() => _lastHeard = partial);
+          }
+          return;
+        }
+        if (!_voiceActive) return;
+        final cmd = result.recognizedWords.toLowerCase();
+        _voiceTimer?.cancel();
+        if (cmd.isEmpty) {
+          try { await _speech.stop(); } catch (_) {}
+          if (mounted) setState(() => _isListening = false);
+          await _sayNotHeardAndRepeat();
+          return;
+        }
+        if (mounted) setState(() => _lastHeard = cmd);
+        try { await _speech.stop(); } catch (_) {}
+        if (mounted) setState(() => _isListening = false);
+        await _handleVoiceCommand(cmd);
+      },
+    );
+  }
+
+  Future<void> _stopListening() async {
+    try {
+      await _speech.stop();
+    } catch (_) {}
+    if (mounted) setState(() => _isListening = false);
+  }
+
+  Future<void> _handleVoiceCommand(String cmd) async {
+    // Global intents
+    if (cmd.contains('start over')) {
+      _selectedCategory = null;
+      _imageFile = null;
+      _description = '';
+      _locationText = null;
+      _voiceStep = VoiceStep.category;
+      await _speak("Starting over.");
+      _stepAttempts = 0;
+      return _promptStep(explain: true);
+    }
+
+    switch (_voiceStep) {
+      case VoiceStep.category:
+        final matched = _matchCategoryFromSpeech(cmd);
+        if (matched != null) {
+          await _speak("You said ${matched['label']['en']}. Say 'yes' to confirm or say another category.");
+          _selectCategory(matched);
+          _voiceStep = VoiceStep.confirmCategory;
+          _stepAttempts = 0;
+          return _promptStep(explain: true);
+        } else {
+          _stepAttempts += 1;
+          await _speak("I didn't catch that.");
+          return _promptStep(explain: _stepAttempts == 1);
+        }
+      case VoiceStep.confirmCategory:
+        if (cmd.contains('yes') || cmd.contains('correct')) {
+          await _speak("Confirmed.");
+          _voiceStep = VoiceStep.photo;
+          _stepAttempts = 0;
+          return _promptStep(explain: true);
+        } else {
+          // Try to interpret a replacement category
+          final matched = _matchCategoryFromSpeech(cmd);
+          if (matched != null) {
+            await _speak("Changing to ${matched['label']['en']}. Say 'yes' to confirm.");
+            _selectCategory(matched);
+            _stepAttempts = 0;
+            return _promptStep(explain: true);
+          }
+          _stepAttempts += 1;
+          await _speak("Not clear. Say 'yes' to confirm or say the category again.");
+          return _promptStep(explain: false);
+        }
+      case VoiceStep.photo:
+        if (cmd.contains('skip') || cmd.contains('no photo') || cmd.contains('without photo')) {
+          await _speak("Okay, skipping photo.");
+          _voiceStep = VoiceStep.submit;
+          _stepAttempts = 0;
+          return _promptStep(explain: true);
+        }
+        if (cmd.contains('take photo') || cmd.contains('take picture') || cmd.contains('capture')) {
+          await _takePhoto();
+          await _speak("Photo captured.");
+          _voiceStep = VoiceStep.submit;
+          _stepAttempts = 0;
+          return _promptStep(explain: true);
+        } else if (cmd.contains('auto description') || cmd.contains('generate') || cmd.contains('describe')) {
+          await _speak("Generating description.");
+          await _autoGenerateDescription();
+          _voiceStep = VoiceStep.submit;
+          _stepAttempts = 0;
+          return _promptStep(explain: true);
+        } else {
+          _stepAttempts += 1;
+          await _speak("Say 'take photo' to capture, 'skip' to continue without photo, or 'auto description' to generate.");
+          return _promptStep(explain: false);
+        }
+      case VoiceStep.submit:
+        if (cmd.contains('submit')) {
+          await _speak("Submitting now.");
+          await _submitIssue();
+          _voiceStep = VoiceStep.done;
+          await _speak("Submitted. Thank you.");
+          _voiceActive = false;
+          _voiceUIHint = 'Voice flow done';
+          if (mounted) setState(() {});
+        } else {
+          _stepAttempts += 1;
+          await _speak("Not clear.");
+          return _promptStep(explain: false);
+        }
+      case VoiceStep.done:
+        await _speak("Voice session completed. You can start again with the mic.");
+        return;
+    }
+  }
+
+  Future<void> _repeatPromptForStep() async {
+    await _promptStep(explain: false);
+  }
+
+  Future<void> _sayNotHeardAndRepeat() async {
+    if (!_voiceActive) return;
+    _stepAttempts += 1;
+    if (_stepAttempts >= 3) {
+      await _speak("I didn't catch that. You can try again or use the screen controls.");
+      _stepAttempts = 0;
+      return;
+    }
+    await _speak("I didn't catch that.");
+    await _promptStep(explain: false);
+  }
+
+  Future<void> _promptStep({required bool explain}) async {
+    if (!_voiceActive) return;
+    String explainText = '';
+    String cue = 'You can speak now.';
+    switch (_voiceStep) {
+      case VoiceStep.category:
+        explainText = explain ? 'Please say the type of issue: pothole, garbage, water leak, streetlight, dogs, tree, other.' : 'Say the issue type.';
+        _voiceUIHint = 'Waiting: say a category (e.g., pothole)';
+        break;
+      case VoiceStep.confirmCategory:
+        explainText = explain ? "Say 'yes' to confirm or say a different category." : "Say 'yes' to confirm or say category.";
+        _voiceUIHint = "Waiting: say 'yes' or a category";
+        break;
+      case VoiceStep.photo:
+        explainText = explain ? "Say 'take photo' to capture, 'skip' to continue without photo, or 'auto description' to generate." : "Say 'take photo', 'skip' or 'auto description'.";
+        _voiceUIHint = "Waiting: say 'take photo', 'skip', or 'auto description'";
+        break;
+      case VoiceStep.submit:
+        explainText = explain ? "Say 'submit' to finish or 'start over' to restart." : "Say 'submit' to finish.";
+        _voiceUIHint = "Waiting: say 'submit'";
+        break;
+      case VoiceStep.done:
+        _voiceUIHint = 'Voice flow done';
+        return;
+    }
+    if (mounted) setState(() {});
+    await _speak(explainText);
+    await _speak(cue);
+    // Short delay to avoid TTS bleeding into STT
+    await Future.delayed(const Duration(milliseconds: 600));
+    await _startListeningSingleUtterance();
+  }
+
+  Map<String, dynamic>? _matchCategoryFromSpeech(String cmd) {
+    Map<String, List<String>> keywords = {
+      'pothole': ['pothole', 'road hole'],
+      'garbage': ['garbage', 'trash', 'waste', 'litter'],
+      'bin': ['bin', 'dustbin', 'broken bin'],
+      'streetlight': ['streetlight', 'street light', 'light'],
+      'toilet': ['toilet', 'public toilet', 'urinal'],
+      'mosquito': ['mosquito', 'dengue', 'mosquito menace'],
+      'water': ['water', 'water stagnation', 'leak', 'leakage'],
+      'drain': ['drain', 'storm drain', 'sewer'],
+      'dogs': ['dog', 'dogs', 'stray dog', 'street dogs'],
+      'tree': ['tree', 'fallen tree', 'branch'],
+      'other': ['other', 'misc', 'something else'],
+    };
+    for (final cat in _categories) {
+      final id = cat['id'] as String;
+      final list = keywords[id] ?? [];
+      for (final k in list) {
+        if (cmd.contains(k)) return cat;
+      }
+    }
+    return null;
   }
 
   Future<void> _scrollToDetails() async {
@@ -250,6 +601,33 @@ class _HomePageState extends State<HomePage> {
     if (res != null && mounted) setState(() => _description = res);
   }
 
+  Future<void> _autoGenerateDescription() async {
+    if (_selectedCategory == null) {
+      showSafeToast("Select an issue first");
+      return;
+    }
+    if (_locationText == null) {
+      showSafeToast("Add a location first");
+      return;
+    }
+    setState(() => _isLoading = true);
+    try {
+      final parts = _locationText!.split(',');
+      final lat = double.tryParse(parts[0]);
+      final lng = double.tryParse(parts[1]);
+      final cat = _selectedCategory?['label']['en']?.toString() ?? 'Issue';
+      final service = AutoDescriptionService();
+      final generated = await service.generate(category: cat, imageFile: _imageFile, lat: lat, lng: lng);
+      if (!mounted) return;
+      setState(() => _description = generated);
+      showSafeToast("Description generated");
+    } catch (e) {
+      showSafeToast("Auto description failed: $e");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   // ----------------------- Upload helpers -----------------------
   Future<String?> _uploadImage(File file) async {
     final user = FirebaseAuth.instance.currentUser;
@@ -368,17 +746,16 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    if (_imageFile == null) {
-      Fluttertoast.showToast(msg: "Attach a photo");
-      return;
-    }
+    // Image is now optional
 
     setState(() => _isLoading = true);
 
-    // 1) Upload image (best-effort, if offline this may fail -> we still attempt to create issue without image)
+    // 1) Upload image (best-effort)
     String? imageUrl;
     try {
-      imageUrl = await _uploadImage(_imageFile!);
+      if (_imageFile != null) {
+        imageUrl = await _uploadImage(_imageFile!);
+      }
     } catch (e) {
       debugPrint("Image upload failed: $e");
       imageUrl = null;
@@ -460,6 +837,8 @@ final data = doc.data() as Map<String, dynamic>? ?? {};
           "location": {"lat": currentLat, "lng": currentLng},
           "upvotes": 0,
           "imageUrl": imageUrl,
+          if (imageUrl == null && _imageFile != null) "localImagePath": _imageFile!.path,
+          if (_imageFile != null) "imageUploadPending": imageUrl == null,
           "departmentId": "dept_1757055931512",
         };
 
@@ -482,6 +861,35 @@ final data = doc.data() as Map<String, dynamic>? ?? {};
       debugPrint("Submit error: $e");
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  /// Try to upload any issues having a pending local image path and update Firestore with the URL
+  Future<void> _syncPendingImages() async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return;
+      final qs = await FirebaseFirestore.instance
+          .collection('issues')
+          .where('createdBy', isEqualTo: user.uid)
+          .where('imageUploadPending', isEqualTo: true)
+          .get(const GetOptions(source: Source.serverAndCache));
+      for (final doc in qs.docs) {
+        final data = doc.data() as Map<String, dynamic>? ?? {};
+        final localPath = data['localImagePath']?.toString();
+        if (localPath == null || localPath.isEmpty) continue;
+        final file = File(localPath);
+        if (!file.existsSync()) continue;
+        final url = await _uploadImage(file);
+        if (url != null) {
+          await doc.reference.update({
+            'imageUrl': url,
+            'imageUploadPending': false,
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Pending image sync error: $e');
     }
   }
 
@@ -518,32 +926,7 @@ final data = doc.data() as Map<String, dynamic>? ?? {};
           ),
         ],
       ),
-      drawer: Drawer(
-        child: SafeArea(
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              ListTile(leading: const Icon(Icons.person), title: Text(t['profile'] ?? ''), onTap: () => Navigator.pushNamed(context, '/profile')),
-              ListTile(leading: const Icon(Icons.home), title: Text(t['title'] ?? ''), onTap: () => Navigator.pop(context)),
-              ListTile(leading: const Icon(Icons.receipt_long), title: Text(t['report'] ?? ''), onTap: () => Navigator.pushNamed(context, '/report')),
-              const Spacer(),
-              const Divider(),
-              ListTile(leading: const Icon(Icons.logout), title: Text(t['logout'] ?? ''), onTap: () async => await _auth.signOut()),
-              ListTile(leading: const Icon(Icons.delete_forever), title: Text(t['delete'] ?? ''), onTap: () async {
-                final user = _auth.currentUser;
-                if (user != null) {
-                  try {
-                    await user.delete();
-                  } catch (e) {
-                    showSafeToast("Delete failed: $e");
-                  }
-                }
-              }),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ),
+      drawer: const AppDrawer(),
       body: Stack(
         children: [
           SingleChildScrollView(
@@ -614,11 +997,12 @@ final data = doc.data() as Map<String, dynamic>? ?? {};
                   locationText: _locationText,
                   imageFile: _imageFile,
                   description: _description,
-                  isSubmitEnabled: _selectedCategory != null && _locationText != null && _imageFile != null && !_isLoading,
+                  isSubmitEnabled: _selectedCategory != null && _locationText != null && !_isLoading,
                   onUseLocation: _getLocation,
                   onPickGallery: _pickFromGallery,
                   onTakePhoto: _takePhoto,
                   onEditDesc: _editDescription,
+                  onAutoDesc: _autoGenerateDescription,
                   onRemoveImage: _removeImage,
                   onSubmit: _isLoading ? () {} : _submitIssue, // additional guarding; main control via isSubmitEnabled
                 ),
@@ -631,8 +1015,39 @@ final data = doc.data() as Map<String, dynamic>? ?? {};
               alignment: Alignment.topCenter,
               child: LinearProgressIndicator(color: themeGreen),
             ),
+          if (_isListening || _voiceUIHint.isNotEmpty)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 86,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      Icon(_isListening ? Icons.hearing : Icons.info, color: Colors.white),
+                      const SizedBox(width: 8),
+                      Text(_voiceUIHint, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                    ]),
+                    if (_lastHeard.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text('Heard: $_lastHeard', style: const TextStyle(color: Colors.white70)),
+                    ]
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
+      floatingActionButton: _VoiceFab(isListening: _isListening || _voiceActive, onTap: () async {
+        if (_voiceActive) {
+          await _stopVoiceFlow();
+        } else {
+          await _startVoiceFlow();
+        }
+      }),
       bottomNavigationBar: const AppBottomNav(currentIndex: 1),
     );
   }
@@ -660,6 +1075,21 @@ class _SectionTitle extends StatelessWidget {
   }
 }
 
+class _VoiceFab extends StatelessWidget {
+  final bool isListening;
+  final VoidCallback onTap;
+  const _VoiceFab({required this.isListening, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return FloatingActionButton(
+      onPressed: onTap,
+      backgroundColor: isListening ? Colors.red : const Color(0xFF2E582D),
+      child: Icon(isListening ? Icons.mic : Icons.mic_none, color: Colors.white),
+    );
+  }
+}
+
 /// Report Details Card (mostly same, improved button disable and image preview removable)
 class _ReportDetailsCard extends StatelessWidget {
   final Color themeGreen;
@@ -673,6 +1103,7 @@ class _ReportDetailsCard extends StatelessWidget {
   final VoidCallback onPickGallery;
   final VoidCallback onTakePhoto;
   final VoidCallback onEditDesc;
+  final VoidCallback onAutoDesc;
   final VoidCallback onRemoveImage;
   final VoidCallback onSubmit;
 
@@ -689,6 +1120,7 @@ class _ReportDetailsCard extends StatelessWidget {
     required this.onPickGallery,
     required this.onTakePhoto,
     required this.onEditDesc,
+    required this.onAutoDesc,
     required this.onRemoveImage,
     required this.onSubmit,
   });
@@ -733,6 +1165,7 @@ class _ReportDetailsCard extends StatelessWidget {
               ActionChip(label: Text(tHome['pick'] ?? ''), onPressed: onPickGallery, avatar: const Icon(Icons.photo, size: 18)),
               ActionChip(label: Text(tHome['camera'] ?? ''), onPressed: onTakePhoto, avatar: const Icon(Icons.camera_alt, size: 18)),
               ActionChip(label: Text(tHome['desc'] ?? ''), onPressed: onEditDesc, avatar: const Icon(Icons.note_alt_outlined, size: 18)),
+              ActionChip(label: Text(tHome['autoDesc'] ?? 'Auto Description'), onPressed: onAutoDesc, avatar: const Icon(Icons.auto_fix_high, size: 18)),
             ],
           ),
           const SizedBox(height: 12),

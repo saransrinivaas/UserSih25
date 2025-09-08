@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'widgets/app_botton_nav.dart';
+import 'widgets/app_drawer.dart';
 
 enum AppLang { en, hi }
 
@@ -62,20 +63,29 @@ class _ReportsPageState extends State<ReportsPage> {
     return null;
   }
 
-  static const List<String> _statusOrder = ['Pending', 'Verified ', 'Resolved'];
-  int _statusToStep(String status) {
+  String _canonicalStatus(String raw) {
+    final s = (raw.isEmpty ? 'Pending' : raw).trim().toLowerCase();
+    if (s == 'resolved') return 'Resolved';
+    if (s == 'in progress' || s == 'verified') return 'Verified';
+    if (s == 'pending') return 'Pending';
+    return 'Pending';
+  }
+  static const List<String> _statusOrder = ['Pending', 'Verified', 'Resolved'];
+  int _statusToStep(String raw) {
+    final status = _canonicalStatus(raw);
     final idx = _statusOrder.indexOf(status);
     return idx >= 0 ? idx : 0;
   }
-  bool _passesFilter(String status) {
+  bool _passesFilter(String raw) {
+    final status = _canonicalStatus(raw);
     if (_statusFilterIndex == 0) return true;
-    final target = _statusFilterIndex == 1 ? 'Pending' : _statusFilterIndex == 2 ? 'Verified ' : 'Resolved';
+    final target = _statusFilterIndex == 1 ? 'Pending' : _statusFilterIndex == 2 ? 'Verified' : 'Resolved';
     return status == target;
   }
   Map<String, int> _summarize(List<Map<String, dynamic>> issues) {
-    final map = {'Pending': 0, 'Verified ': 0, 'Resolved': 0};
+    final map = {'Pending': 0, 'Verified': 0, 'Resolved': 0};
     for (final it in issues) {
-      final s = (it['status'] ?? 'Pending').toString();
+      final s = _canonicalStatus((it['status'] ?? 'Pending').toString());
       if (map.containsKey(s)) map[s] = (map[s] ?? 0) + 1;
     }
     return map;
@@ -86,7 +96,7 @@ class _ReportsPageState extends State<ReportsPage> {
     return filtered;
   }
   Widget _buildSummary(Map<String, int> sum) {
-    final total = (sum['Pending'] ?? 0) + (sum['Verified '] ?? 0) + (sum['Resolved'] ?? 0);
+    final total = (sum['Pending'] ?? 0) + (sum['Verified'] ?? 0) + (sum['Resolved'] ?? 0);
     Widget chip(String label, int count, Color bg) => Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
@@ -100,7 +110,7 @@ class _ReportsPageState extends State<ReportsPage> {
         const SizedBox(height: 8),
         Wrap(spacing: 8, runSpacing: 8, children: [
           chip(_lang == AppLang.en ? 'Pending' : 'लंबित', sum['Pending'] ?? 0, const Color(0xFFFFF4CC)),
-          chip(_lang == AppLang.en ? 'Verified ' : 'प्रगति में', sum['Verified '] ?? 0, const Color(0xFFDDEBFF)),
+          chip(_lang == AppLang.en ? 'Verified' : 'सत्यापित', sum['Verified'] ?? 0, const Color(0xFFDDEBFF)),
           chip(_lang == AppLang.en ? 'Resolved' : 'सुलझा', sum['Resolved'] ?? 0, const Color(0xFFD0F0D2)),
         ])
       ]),
@@ -163,22 +173,8 @@ class _ReportsPageState extends State<ReportsPage> {
           ),
         ],
       ),
-      drawer: Drawer(
-        child: SafeArea(
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              ListTile(leading: const Icon(Icons.person), title: const Text('Profile'), onTap: () => Navigator.pushReplacementNamed(context, '/profile')),
-              ListTile(leading: const Icon(Icons.home), title: const Text('Home'), onTap: () => Navigator.pushReplacementNamed(context, '/home')),
-              ListTile(leading: const Icon(Icons.receipt_long), title: const Text('Reports'), onTap: () => Navigator.pushReplacementNamed(context, '/report')),
-              const Spacer(),
-              const Divider(),
-              ListTile(leading: const Icon(Icons.logout), title: const Text('Logout'), onTap: _logout),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ),
+      // Voice FAB removed per request
+      drawer: const AppDrawer(),
       body: DefaultTabController(
         length: 2,
         child: Column(
@@ -227,7 +223,7 @@ class _ReportsPageState extends State<ReportsPage> {
                               const SizedBox(height: 12),
                               _buildStatusFilter(),
                               const SizedBox(height: 12),
-                              for (final data in filtered) _IssueProgressCard(data: data, themeGreen: themeGreen),
+                              for (final data in filtered) _IssueProgressCard(data: data, themeGreen: themeGreen, lang: _lang),
                             ],
                           );
                         },
@@ -257,7 +253,7 @@ class _ReportsPageState extends State<ReportsPage> {
                                   const SizedBox(height: 12),
                                   _buildStatusFilter(),
                                   const SizedBox(height: 12),
-                                  for (final data in filtered) _IssueProgressCard(data: data, themeGreen: themeGreen),
+                                  for (final data in filtered) _IssueProgressCard(data: data, themeGreen: themeGreen, lang: _lang),
                                 ],
                               );
                             },
@@ -332,11 +328,13 @@ class _IssueTile extends StatelessWidget {
 class _IssueProgressCard extends StatelessWidget {
   final Map<String, dynamic> data;
   final Color themeGreen;
-  const _IssueProgressCard({required this.data, required this.themeGreen});
+  final AppLang lang;
+  const _IssueProgressCard({required this.data, required this.themeGreen, required this.lang});
 
   int _statusToStep(String status) {
-    const order = ['Pending', 'Verified ', 'Resolved'];
-    final idx = order.indexOf(status);
+    const order = ['Pending', 'Verified', 'Resolved'];
+    final normalized = status.trim() == 'Verified ' ? 'Verified' : status.trim();
+    final idx = order.indexOf(normalized);
     return idx >= 0 ? idx : 0;
   }
 
@@ -366,10 +364,10 @@ class _IssueProgressCard extends StatelessWidget {
         const SizedBox(height: 12),
         LinearProgressIndicator(value: step / 2.0, color: themeGreen, backgroundColor: const Color(0xFFE8F5E9)),
         const SizedBox(height: 8),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
-          Text('Pending'),
-          Text('Verified '),
-          Text('Resolved'),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text(lang == AppLang.en ? 'Pending' : 'लंबित'),
+          Text(lang == AppLang.en ? 'Verified' : 'सत्यापित'),
+          Text(lang == AppLang.en ? 'Resolved' : 'सुलझा'),
         ]),
       ]),
     );

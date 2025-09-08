@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'widgets/app_botton_nav.dart'; // make sure the path is correct
+import 'widgets/app_drawer.dart';
 
 
 enum AppLang { en, hi }
@@ -188,46 +189,8 @@ class _ProfilePageState extends State<ProfilePage> {
           ),
         ],
       ),
-      drawer: Drawer(
-        child: SafeArea(
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              ListTile(
-                leading: const Icon(Icons.person),
-                title: Text(tHome['profile'] ?? ''),
-                onTap: () => Navigator.pushReplacementNamed(context, '/profile'),
-              ),
-              ListTile(
-                leading: const Icon(Icons.home),
-                title: Text(tHome['title'] ?? ''),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.pushReplacementNamed(context, '/home');
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.receipt_long),
-                title: Text(tHome['report'] ?? ''),
-                onTap: () => Navigator.pushReplacementNamed(context, '/report'),
-              ),
-              const Spacer(),
-              Divider(),
-              ListTile(
-                leading: const Icon(Icons.logout),
-                title: Text(tHome['logout'] ?? ''),
-                onTap: _logout,
-              ),
-              ListTile(
-                leading: const Icon(Icons.delete_forever),
-                title: Text(tHome['delete'] ?? ''),
-                onTap: _deleteAccount,
-              ),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ),
+      // Voice FAB removed per request
+      drawer: const AppDrawer(),
       body: SingleChildScrollView(
         controller: _scroll,
         padding: const EdgeInsets.all(16),
